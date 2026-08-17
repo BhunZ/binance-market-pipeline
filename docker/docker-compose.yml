@@ -18,6 +18,11 @@ x-airflow-common: &airflow-common
     # leaving the scheduler room; the real throttle is REQUEST_SPACING_S inside the client.
     AIRFLOW__CORE__PARALLELISM: "16"
     AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "16"
+    # Airflow 3 runs tasks against an execution API rather than letting them reach the metadata
+    # database directly. The default points at localhost, which inside the scheduler container is
+    # nothing at all — every task then dies with `ConnectError: Connection refused` before its
+    # code runs, and the scheduler reports it as a task failure rather than a wiring problem.
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://apiserver:8080/execution/
     PYTHONPATH: /opt/airflow/src
     # Passed through rather than baked in. An image holding credentials cannot be shared, and a
     # layer that once held a secret keeps it even after a later RUN deletes the file.
