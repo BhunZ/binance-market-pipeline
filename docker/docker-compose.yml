@@ -71,6 +71,18 @@ services:
       init:
         condition: service_completed_successfully
 
+  # Airflow 3 parses DAGs in its own process rather than inside the scheduler. Without this
+  # service the scheduler starts cleanly, reports no import errors, and lists no DAGs — a
+  # silence that reads like the mount is wrong when nothing is wrong except the missing
+  # component.
+  dag-processor:
+    <<: *airflow-common
+    command: bash -c "pip install --no-cache-dir -r /opt/airflow/src/requirements-dag.txt && airflow dag-processor"
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
   apiserver:
     <<: *airflow-common
     command: bash -c "pip install --no-cache-dir -r /opt/airflow/src/requirements-dag.txt && airflow api-server"
