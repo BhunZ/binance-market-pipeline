@@ -1,0 +1,86 @@
+# Airflow for local development and for the Oracle VM — the same file in both places.
+#
+# LocalExecutor, not Celery. The work here is IO-bound HTTP with a floor between calls, so
+# parallelism is bounded by politeness to Binance rather than by CPU. Celery would add a broker,
+# a worker tier and two more failure modes to schedule twenty tasks a day.
+#
+# Postgres is Airflow's metadata database here and the warehouse in M2. One instance, two
+# schemas — a second container for a few million rows would be a container to keep alive for no
+# reason.
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:3.0.2-python3.12
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    # Mapped tasks fan out to twenty at once. Sixteen slots keeps the fan-out useful while
+    # leaving the scheduler room; the real throttle is REQUEST_SPACING_S inside the client.
+    AIRFLOW__CORE__PARALLELISM: "16"
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "16"
+    PYTHONPATH: /opt/airflow/src
+    # Passed through rather than baked in. An image holding credentials cannot be shared, and a
+    # layer that once held a secret keeps it even after a later RUN deletes the file.
+    R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+    R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+    R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+    R2_BUCKET: ${R2_BUCKET:-}
+  volumes:
+    - ../dags:/opt/airflow/dags
+    - ../src:/opt/airflow/src
+    - ../data:/opt/airflow/data
+    - airflow-logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Runs once and exits. Migrating on every scheduler start is how two schedulers race each
+  # other through the same migration.
+  init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        pip install --no-cache-dir -r /opt/airflow/src/requirements-dag.txt
+        airflow db migrate
+        airflow users create --username admin --password admin \
+          --firstname a --lastname b --role Admin --email admin@example.com || true
+    restart: "no"
+
+  scheduler:
+    <<: *airflow-common
+    command: bash -c "pip install --no-cache-dir -r /opt/airflow/src/requirements-dag.txt && airflow scheduler"
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  apiserver:
+    <<: *airflow-common
+    command: bash -c "pip install --no-cache-dir -r /opt/airflow/src/requirements-dag.txt && airflow api-server"
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:
+  airflow-logs:

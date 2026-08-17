@@ -1,0 +1,7 @@
+# Installed into the Airflow containers on top of the base image. Deliberately short: the DAG
+# needs an HTTP client, a dataframe, a Parquet writer and an S3 client. Anything heavier belongs
+# in a task that runs elsewhere, not in an image the scheduler has to start.
+requests>=2.32
+pandas>=2.2
+pyarrow>=15.0
+boto3>=1.34
