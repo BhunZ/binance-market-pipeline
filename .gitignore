@@ -13,3 +13,6 @@ venv/
 build/
 dist/
 logs/
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/

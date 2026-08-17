@@ -1,0 +1,20 @@
+name: bmp
+version: "1.0.0"
+profile: bmp
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+
+models:
+  bmp:
+    staging:
+      # Views: staging only renames, casts and derives keys. Materialising it would store a
+      # second copy of every row to save a cheap scan.
+      +materialized: view
+      +schema: staging
+    marts:
+      +materialized: table
+      +schema: marts

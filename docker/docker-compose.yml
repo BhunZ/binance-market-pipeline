@@ -46,6 +46,11 @@ services:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
+    # Exposed so dbt and the loader can run from the host against the same database the DAG
+    # writes to. One warehouse, reachable from both sides of the container boundary — two would
+    # mean a model built on data the pipeline never produced.
+    ports:
+      - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:

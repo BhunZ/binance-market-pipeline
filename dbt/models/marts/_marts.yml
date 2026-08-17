@@ -1,0 +1,75 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: One row per date present in the data. Built from what exists, not generated.
+    columns:
+      - name: date_key
+        tests: [unique, not_null]
+      - name: date
+        tests: [unique, not_null]
+
+  - name: dim_time
+    description: >
+      One row per minute of the UTC day, generated 0-1439. Fixed size, and complete whether or
+      not a candle landed in every minute.
+    columns:
+      - name: minute_key
+        tests:
+          - unique
+          - not_null
+          - dbt_utils.accepted_range: {min_value: 0, max_value: 1439}
+      - name: hour_utc
+        tests:
+          - dbt_utils.accepted_range: {min_value: 0, max_value: 23}
+      - name: session
+        tests:
+          - accepted_values: {values: ['asia', 'europe', 'americas']}
+
+  - name: dim_symbol
+    description: >
+      One row per trading pair, Type 1 for now. Becomes Type 2 when daily exchangeInfo snapshots
+      land in Bronze and there is an attribute that genuinely changes.
+    columns:
+      - name: symbol_key
+        tests: [unique, not_null]
+      - name: symbol
+        tests: [unique, not_null]
+      - name: quote_asset
+        description: >
+          Every configured pair quotes in USDT. If a non-USDT pair is ever added, the base asset
+          is parsed wrong and this test fails rather than the error passing unnoticed.
+        tests:
+          - not_null
+          - accepted_values: {values: ['USDT']}
+      - name: days_observed
+        tests:
+          - dbt_utils.expression_is_true: {expression: "> 0"}
+
+  - name: fact_ohlcv_1m
+    description: >
+      One row per symbol per minute. The grain is stated because every column either identifies
+      it or measures it, and a measure at a different grain would multiply every sum by 1440.
+    columns:
+      - name: symbol_key
+        tests:
+          - not_null
+          - relationships: {to: ref('dim_symbol'), field: symbol_key}
+      - name: date_key
+        tests:
+          - not_null
+          - relationships: {to: ref('dim_date'), field: date_key}
+      - name: minute_key
+        tests:
+          - not_null
+          - relationships: {to: ref('dim_time'), field: minute_key}
+      - name: taker_buy_ratio
+        description: Null when nothing traded — no trades means no answer, not zero.
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 1
+              config: {where: "taker_buy_ratio is not null"}
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [symbol_key, date_key, minute_key]

@@ -1,0 +1,17 @@
+# Connection for dbt. The same database the loader writes to and the DAG reads back — a second
+# warehouse would let a model be built on data the pipeline never produced.
+#
+# Host defaults to localhost for a run from the developer's machine; inside the Airflow
+# containers DBT_HOST is set to `postgres`, the compose service name.
+bmp:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('DBT_HOST', 'localhost') }}"
+      port: "{{ env_var('DBT_PORT', '5432') | int }}"
+      user: "{{ env_var('DBT_USER', 'airflow') }}"
+      password: "{{ env_var('DBT_PASSWORD', 'airflow') }}"
+      dbname: "{{ env_var('DBT_DBNAME', 'airflow') }}"
+      schema: dbt
+      threads: 4

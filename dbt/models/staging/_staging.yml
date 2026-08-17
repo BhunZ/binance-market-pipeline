@@ -1,0 +1,80 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    description: >
+      Bronze loaded from Parquet, one date replaced per load. Nothing here is transformed;
+      the only change from the object store is that the numbers are numbers.
+    tables:
+      - name: klines_1m
+        description: One-minute candles, one row per symbol-minute.
+        loaded_at_field: loaded_at
+        columns:
+          - name: symbol
+            tests: [not_null]
+          - name: minute
+            tests: [not_null]
+
+models:
+  - name: stg_klines
+    description: >
+      Typed candles with surrogate keys and the derived measures every mart needs. A view, so
+      it costs a scan rather than a second copy of every row.
+    columns:
+      - name: symbol
+        tests: [not_null]
+      - name: minute
+        tests: [not_null]
+      - name: minute_key
+        description: Minute of the UTC day, 0-1439.
+        tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 1439
+      - name: date_key
+        tests: [not_null]
+      - name: high
+        description: >
+          The session high. Must be the largest of the four prices — if it is not, the row is
+          not a candle, and every high/low analysis built on it is wrong in a way no row count
+          would reveal.
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= low"
+          - dbt_utils.expression_is_true:
+              expression: ">= open"
+          - dbt_utils.expression_is_true:
+              expression: ">= close"
+      - name: low
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "<= open"
+          - dbt_utils.expression_is_true:
+              expression: "<= close"
+      - name: open
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: close
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "> 0"
+      - name: volume
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: trades
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [symbol, minute]
