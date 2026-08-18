@@ -11,6 +11,10 @@ ENV_FILE="$HOME/.bmp_env"
 
 [ -f "$ENV_FILE" ] || { echo "missing $ENV_FILE — create it before installing"; exit 1; }
 
+# systemd refuses to start a unit whose ReadWritePaths does not exist. This one is only used
+# when object storage is unconfigured, so it is usually absent on a working host.
+mkdir -p "$REPO/data"
+
 for unit in bmp-ws-consumer bmp-aggregator; do
     sudo cp "$REPO/deploy/$unit.service" "/etc/systemd/system/$unit.service"
 done

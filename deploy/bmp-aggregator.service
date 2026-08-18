@@ -27,7 +27,12 @@ MemoryMax=300M
 
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/tmp /home/bmp/binance-market-pipeline/data
+# The leading dash makes a missing path a no-op instead of a hard failure. Without it the unit
+# died with `Failed to set up mount namespacing ... No such file or directory` and restarted
+# forever — the data directory only exists when object storage is unconfigured and the aggregator
+# falls back to local files, which on this host it never does.
+ReadWritePaths=/tmp
+ReadWritePaths=-/home/bmp/binance-market-pipeline/data
 NoNewPrivileges=true
 
 StandardOutput=journal
