@@ -175,3 +175,66 @@ def row_counts() -> list[tuple]:
             FROM {RAW_SCHEMA}.{RAW_TABLE} GROUP BY dt ORDER BY dt
         """)
         return cur.fetchall()
+
+
+# ----------------------------------------------------------------------------------
+# Symbol metadata — the source the Type 2 dimension is built from
+# ----------------------------------------------------------------------------------
+
+EXCHANGE_TABLE = "exchange_info"
+
+EXCHANGE_DDL = f"""
+CREATE TABLE IF NOT EXISTS {RAW_SCHEMA}.{EXCHANGE_TABLE} (
+    snapshot_date          date NOT NULL,
+    symbol                 text NOT NULL,
+    status                 text NOT NULL,
+    base_asset             text,
+    quote_asset            text,
+    base_precision         integer,
+    quote_precision        integer,
+    spot_trading_allowed   boolean,
+    margin_trading_allowed boolean,
+    tick_size              numeric(38, 12),
+    min_price              numeric(38, 12),
+    max_price              numeric(38, 12),
+    step_size              numeric(38, 12),
+    min_qty                numeric(38, 12),
+    max_qty                numeric(38, 12),
+    min_notional           numeric(38, 12),
+    max_notional           numeric(38, 12),
+    loaded_at              timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (snapshot_date, symbol)
+);
+"""
+
+
+def ensure_exchange_schema() -> None:
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(EXCHANGE_DDL)
+        conn.commit()
+
+
+def load_exchange_info(df, run_date: str) -> int:
+    """Replace one day of symbol metadata. Same delete-then-insert as the candles.
+
+    The dbt snapshot reads the *latest* row per symbol from here, so this table holds raw daily
+    observations and the snapshot holds the versioned history. Keeping those separate means a
+    re-loaded day corrects the observation without rewriting the version history built from it.
+    """
+    if df.empty:
+        return 0
+
+    cols = [c for c in df.columns if c != "loaded_at"]
+    buf = io.StringIO()
+    df[cols].to_csv(buf, index=False, header=False)
+    buf.seek(0)
+
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(
+            f"DELETE FROM {RAW_SCHEMA}.{EXCHANGE_TABLE} WHERE snapshot_date = %s", (run_date,))
+        with cur.copy(
+            f"COPY {RAW_SCHEMA}.{EXCHANGE_TABLE} ({', '.join(cols)}) FROM STDIN WITH (FORMAT csv)"
+        ) as copy:
+            copy.write(buf.read())
+        conn.commit()
+    return len(df)

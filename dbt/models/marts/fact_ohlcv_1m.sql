@@ -1,6 +1,6 @@
 {{ config(
     materialized = 'incremental',
-    unique_key = ['symbol_key', 'date_key', 'minute_key'],
+    unique_key = ['symbol', 'date_key', 'minute_key'],
     incremental_strategy = 'delete+insert',
     partition_by = 'date_key'
 ) }}
@@ -33,6 +33,10 @@ with klines as (
 joined as (
 
     select
+        -- Points at the version of the symbol that was current when the minute happened, not at
+        -- the symbol as it is today. This is the entire reason the dimension is Type 2: a minute
+        -- from June must join to June's tick size even after it changed in August.
+        s.symbol_version_key,
         s.symbol_key,
         k.date_key,
         k.minute_key,
@@ -66,7 +70,14 @@ joined as (
         k.loaded_at
 
     from klines k
-    inner join {{ ref('dim_symbol') }} s on s.symbol = k.symbol
+    inner join {{ ref('dim_symbol') }} s
+        on  s.symbol = k.symbol
+        -- The validity window is half-open: valid_from inclusive, valid_to exclusive, and null
+        -- valid_to means still current. A closed interval on both ends would match two versions
+        -- on the instant one replaced the other and silently double every measure for that
+        -- minute.
+        and k.minute >= s.valid_from
+        and (s.valid_to is null or k.minute < s.valid_to)
 
 )
 

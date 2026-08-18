@@ -31,10 +31,18 @@ models:
       One row per trading pair, Type 1 for now. Becomes Type 2 when daily exchangeInfo snapshots
       land in Bronze and there is an attribute that genuinely changes.
     columns:
-      - name: symbol_key
+      - name: symbol_version_key
+        description: One row per version. Unique; symbol_key is not, and must not be.
         tests: [unique, not_null]
       - name: symbol
-        tests: [unique, not_null]
+        description: >
+          Deliberately NOT unique. A pair with three metadata changes has four rows, which is
+          what a Type 2 dimension is for.
+        tests: [not_null]
+      - name: valid_from
+        tests: [not_null]
+      - name: is_current
+        tests: [not_null]
       - name: quote_asset
         description: >
           Every configured pair quotes in USDT. If a non-USDT pair is ever added, the base asset
@@ -51,10 +59,10 @@ models:
       One row per symbol per minute. The grain is stated because every column either identifies
       it or measures it, and a measure at a different grain would multiply every sum by 1440.
     columns:
-      - name: symbol_key
+      - name: symbol_version_key
         tests:
           - not_null
-          - relationships: {to: ref('dim_symbol'), field: symbol_key}
+          - relationships: {to: ref('dim_symbol'), field: symbol_version_key}
       - name: date_key
         tests:
           - not_null
@@ -72,4 +80,4 @@ models:
               config: {where: "taker_buy_ratio is not null"}
     tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns: [symbol_key, date_key, minute_key]
+          combination_of_columns: [symbol, date_key, minute_key]

@@ -16,6 +16,20 @@ sources:
           - name: minute
             tests: [not_null]
 
+      - name: exchange_info
+        description: >
+          Daily snapshot of symbol metadata. Binance serves only the current state, so a day
+          missed is a day of dimension history that cannot be recovered — which is the argument
+          for snapshotting on a schedule rather than on demand.
+        loaded_at_field: loaded_at
+        columns:
+          - name: snapshot_date
+            tests: [not_null]
+          - name: symbol
+            tests: [not_null]
+          - name: status
+            tests: [not_null]
+
 models:
   - name: stg_klines
     description: >
