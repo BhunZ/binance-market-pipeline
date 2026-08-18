@@ -204,6 +204,32 @@ no gap, no row-count anomaly. The only way to see it is to compute the same minu
 
 ---
 
+## Knowing when it stops
+
+`src/bmp/health.py`, on a systemd timer, judges the streaming branch by what it produced.
+
+**Not by process state.** `systemctl is-active` answers a question nobody needs: a service can be
+running and producing nothing. Worse, a unit that is crash-looping reports `activating` rather than
+`failed`, so it never trips a status check at all — which is how thirty-four consecutive restarts
+left no trace anywhere but the journal.
+
+**Not by timestamps alone, either.** Each service writes a heartbeat carrying a cumulative
+counter, and the check asks whether that counter moved since its last reading. A timestamp proves
+a process is alive; the counter proves it is working. The two differ exactly in the case worth
+catching, and the counter notices sooner: a stalled aggregator is caught on the next check rather
+than after its heartbeat has aged past a timeout.
+
+The receiver is held only to freshness, not to a moving counter — it rewrites its heartbeat
+alongside a fresh timestamp, so freshness already implies progress, and demanding more would
+report a quiet market as an outage.
+
+Failures go to the journal always, and to `BMP_ALERT_WEBHOOK` when one is configured. The payload
+carries both `content` and `text`, so one URL works for Discord or Slack without a per-provider
+branch. An unreachable webhook is logged and never masks the result it was carrying, and the exit
+code is non-zero either way so the timer records the failure regardless.
+
+---
+
 ## What the tests hold
 
 dbt tests run inside `dbt build` rather than after it, so a model whose test fails blocks
