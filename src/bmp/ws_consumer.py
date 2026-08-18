@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import signal
 import time
 from dataclasses import dataclass, field
@@ -27,7 +28,17 @@ from .config import SYMBOLS
 
 logger = logging.getLogger(__name__)
 
-WS_BASE = "wss://stream.binance.com:9443/stream"
+#: The public-data host, not `stream.binance.com`.
+#:
+#: Measured from the GCP VM: `stream.binance.com` answers the upgrade with **HTTP 451,
+#: Unavailable For Legal Reasons** — Binance geo-blocks US addresses, and GCP's always-free tier
+#: exists only in us-west1, us-central1 and us-east1. Every one of them is in the United States,
+#: so there is no free-tier region where that host would work.
+#:
+#: `data-stream.binance.vision` serves the same market-data streams without the restriction, and
+#: is the WebSocket sibling of the `data-api.binance.vision` the REST layer already uses for the
+#: same reason. Overridable so a machine outside the US can point at either.
+WS_BASE = os.getenv("BINANCE_WS_BASE", "wss://data-stream.binance.vision:9443") + "/stream"
 
 #: Binance closes an idle connection after 24 hours whatever happens, so a reconnect is a normal
 #: event rather than an error. Backoff is capped low because being down is worse than being
