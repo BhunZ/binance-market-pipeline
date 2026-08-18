@@ -12,6 +12,15 @@ half fail on its own terms, and lets the warehouse be rebuilt without re-fetchin
 The dependency between them is data, not schedule: this DAG waits for the day's partitions to
 exist rather than for the other DAG to have run. A partition backfilled by hand counts just the
 same, which is what let the warehouse be populated while the scheduler was still being wired.
+
+**Nothing to load is not a reason to do nothing.** `load_pending` skips when the warehouse
+already holds every complete Bronze day, and a skip in Airflow propagates: downstream tasks skip
+too and the run still reports success. That put the dimension snapshot behind a condition it has
+nothing to do with — and Binance serves only the current state, so a day it skips is a day of
+symbol history that cannot be recovered later. It also left the dbt models unbuilt on any day
+klines did not advance, while the streaming branch kept writing minutes that then never reached
+the reconciliation. The snapshot now runs on its own, and dbt runs whenever nothing upstream has
+actually failed.
 """
 
 from __future__ import annotations
@@ -24,6 +33,7 @@ import pendulum
 from airflow.decorators import dag, task
 from airflow.exceptions import AirflowFailException, AirflowSkipException
 from airflow.providers.standard.operators.bash import BashOperator
+from airflow.utils.trigger_rule import TriggerRule
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -113,11 +123,15 @@ def binance_warehouse():
     # dbt as shell commands rather than through a Python API: the CLI is the interface dbt
     # supports, and its exit code is the only signal that means the same thing in CI, in a
     # terminal, and here.
+    # `none_failed` and not the default `all_success`: `load_pending` skips on a day with no new
+    # Bronze partition, and under the default rule that skip cascades here and the run goes green
+    # having built nothing. A skip upstream means there was no work, not that the work failed.
     dbt_snapshot = BashOperator(
         task_id="dbt_snapshot",
         bash_command=f"cd {DBT_DIR} && dbt snapshot --no-use-colors",
         env=DBT_ENV,
         append_env=True,
+        trigger_rule=TriggerRule.NONE_FAILED,
     )
 
     # `build` rather than `run` then `test`: build interleaves them, so a model whose test fails
@@ -128,9 +142,13 @@ def binance_warehouse():
         bash_command=f"cd {DBT_DIR} && dbt build --no-use-colors",
         env=DBT_ENV,
         append_env=True,
+        trigger_rule=TriggerRule.NONE_FAILED,
     )
 
-    load_pending() >> snapshot_symbols() >> dbt_snapshot >> dbt_build
+    # The snapshot is a root task, not a consequence of loading klines. The two read different
+    # endpoints for different things and neither is a precondition of the other; chaining them
+    # only meant one could silently cancel the other.
+    [load_pending(), snapshot_symbols()] >> dbt_snapshot >> dbt_build
 
 
 binance_warehouse()
