@@ -1,0 +1,19 @@
+[Unit]
+Description=Run the BMP streaming health check periodically
+
+[Timer]
+# Five minutes. The aggregator closes windows continuously, so five minutes is many flush cycles
+# of evidence — long enough that a single slow moment cannot trip it, short enough that an outage
+# is caught while it is still the current outage.
+OnBootSec=3min
+OnUnitActiveSec=5min
+
+# Fire the missed run after the box comes back rather than skipping to the next slot, since the
+# interval after a reboot is exactly when something is most likely to be wrong.
+Persistent=true
+
+# Without this every check lands on the same second as every other timer on the host.
+RandomizedDelaySec=20
+
+[Install]
+WantedBy=timers.target

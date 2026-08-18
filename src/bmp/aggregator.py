@@ -60,6 +60,12 @@ LATENESS_GRACE_S = 5.0
 #: How often to check for windows ready to close, and write whatever is due.
 FLUSH_INTERVAL_S = 10.0
 
+#: Written after every flush, carrying the cumulative window count. The count is the part that
+#: matters: a timestamp alone only proves the process is alive, and a process that is alive and
+#: building nothing is the failure worth catching. `bmp.health` compares it against its previous
+#: reading.
+HEARTBEAT_PATH = "/tmp/bmp_agg_heartbeat"
+
 
 @dataclass
 class Bar:
@@ -310,6 +316,15 @@ def commit_safely(consumer: Consumer, agg: "Aggregator", position: dict[int, int
                     asynchronous=False)
 
 
+def touch_heartbeat(stats: Stats, path: str = HEARTBEAT_PATH) -> None:
+    try:
+        with open(path, "w") as fh:
+            fh.write(f"{time.time():.0f} {stats.windows_written}\n")
+    except OSError:
+        # A heartbeat that cannot be written must never take the aggregator down with it.
+        logger.debug("could not write heartbeat", exc_info=True)
+
+
 def run(group_id: str = "aggregator", duration_s: float | None = None) -> Stats:
     """Consume trades and write minute bars until stopped."""
     if not kafka_conf.is_configured():
@@ -352,6 +367,7 @@ def run(group_id: str = "aggregator", duration_s: float | None = None) -> Stats:
                     position[msg.partition()] = msg.offset() + 1
 
             if time.monotonic() - last_flush >= FLUSH_INTERVAL_S:
+                touch_heartbeat(agg.stats)
                 if agg.flush():
                     # Only after the windows are on object storage, and only up to the oldest
                     # trade still held open. A crash before this replays those trades; a crash

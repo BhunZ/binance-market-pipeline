@@ -1,0 +1,31 @@
+[Unit]
+# Asks whether the streaming branch produced anything, and says so if it did not.
+Description=BMP streaming health check
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=bmp
+WorkingDirectory=/home/bmp/binance-market-pipeline
+# Reads BMP_ALERT_WEBHOOK from here when one is configured. Without it the check still runs and
+# still records its verdict in the journal — an unconfigured webhook is a quieter alert, not a
+# broken check.
+EnvironmentFile=/home/bmp/.bmp_env
+Environment=PYTHONPATH=/home/bmp/binance-market-pipeline/src
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/bmp/venv/bin/python -m bmp.health --quiet
+
+# No Restart=. A failed check means the thing it watches is unhealthy, and retrying the check
+# would only overwrite the state file it compares against — hiding the stall it just found.
+
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/tmp
+NoNewPrivileges=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bmp-health
+
+[Install]
+WantedBy=multi-user.target
