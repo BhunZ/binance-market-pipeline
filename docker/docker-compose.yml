@@ -23,6 +23,13 @@ x-airflow-common: &airflow-common
     # nothing at all — every task then dies with `ConnectError: Connection refused` before its
     # code runs, and the scheduler reports it as a task failure rather than a wiring problem.
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://apiserver:8080/execution/
+    # Task workers authenticate to that API with a JWT. Every container generates its own random
+    # signing secret at start-up unless told otherwise, so the scheduler signs a token the API
+    # server cannot verify and every task dies with `Invalid auth token: Signature verification
+    # failed` — before its code runs, and reported as a task failure rather than as a shared-key
+    # problem. One secret across all four services is the fix.
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-bmp-local-dev-jwt-secret-change-me}
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW_JWT_SECRET:-bmp-local-dev-jwt-secret-change-me}
     PYTHONPATH: /opt/airflow/src
     # Passed through rather than baked in. An image holding credentials cannot be shared, and a
     # layer that once held a secret keeps it even after a later RUN deletes the file.
@@ -34,6 +41,8 @@ x-airflow-common: &airflow-common
     - ../dags:/opt/airflow/dags
     - ../src:/opt/airflow/src
     - ../data:/opt/airflow/data
+    # dbt runs inside the worker, against the same Postgres the loader writes to.
+    - ../dbt:/opt/airflow/dbt
     - airflow-logs:/opt/airflow/logs
   depends_on:
     postgres:

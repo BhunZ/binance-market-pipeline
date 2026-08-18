@@ -22,10 +22,17 @@ with klines as (
     select * from {{ ref('stg_klines') }}
 
     {% if is_incremental() %}
-    -- Only the dates in this batch. The subquery is over the source rather than the target so a
-    -- date can be re-run after its rows were deleted, which a `max(date_key) from this` filter
-    -- would make impossible.
-    where dt >= (select coalesce(max(date), '1970-01-01'::date) from {{ ref('dim_date') }})
+    -- Rows loaded into `raw` since this table was last built — by load time, not by date.
+    --
+    -- Filtering on the date was wrong in a way that is worth recording. `dt >= max(date)` picked
+    -- up only the newest date, so a backfill that added sixty older days left every one of them
+    -- out: raw held 2.6M rows and the fact held 1.87M. Nothing errored. It surfaced only because
+    -- `assert_fact_covers_every_raw_row` compares the two counts — the shape tests were all still
+    -- green, because every row that *was* there was perfectly well formed.
+    --
+    -- `loaded_at` handles both cases the date cannot: a date arriving late, and a date being
+    -- re-loaded to correct it. Both get a fresh `loaded_at`, so both come back through here.
+    where loaded_at > (select coalesce(max(loaded_at), '-infinity'::timestamptz) from {{ this }})
     {% endif %}
 
 ),
