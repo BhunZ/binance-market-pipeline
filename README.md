@@ -163,8 +163,13 @@ an open window, so a restart replays that minute from its first trade.
 
 ### Running unattended
 
-`deploy/` holds a systemd unit per service and an installer. Both restart automatically and carry
-memory limits, and the receiver restarts faster than the aggregator: rejoining a consumer group
+`deploy/` holds a systemd unit per service and an installer. They run on a GCP Compute Engine
+always-free VM, which is also why the receiver points at `data-stream.binance.vision`: every
+always-free region is in the United States, and Binance answers a WebSocket upgrade from a US
+address with HTTP 451.
+
+Both services restart automatically and carry memory limits, and the receiver restarts faster
+than the aggregator: rejoining a consumer group
 every few seconds triggers a rebalance storm that costs more than the restart saves, while a
 second of disconnection from Binance is unrecoverable.
 
