@@ -1,0 +1,45 @@
+[Unit]
+# Receives the Binance trade stream and forwards it to Kafka. Nothing else.
+Description=BMP Binance WebSocket consumer
+After=network-online.target
+Wants=network-online.target
+# Not `Requires=` on anything else: this must come back up whether or not the aggregator is
+# healthy. The whole reason the raw feed goes to a broker is so the two halves fail apart.
+
+[Service]
+Type=simple
+User=bmp
+WorkingDirectory=/home/bmp/binance-market-pipeline
+EnvironmentFile=/home/bmp/.bmp_env
+Environment=PYTHONPATH=/home/bmp/binance-market-pipeline/src
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/bmp/venv/bin/python -m bmp.ws_consumer
+
+# Always restart, and quickly. Every second disconnected is a second of trades that no later
+# run can recover — Binance serves no history for the trade stream.
+Restart=always
+RestartSec=5
+
+# Without this, systemd gives up permanently after five restarts in ten seconds. A flapping
+# network would then take the stream down until someone noticed by hand, which is the failure
+# this service exists to survive.
+StartLimitIntervalSec=0
+
+# The box has 955 MB. A leak here must kill this service rather than have the kernel pick a
+# victim — an OOM kill of Postgres or the aggregator would be far worse and much harder to trace.
+MemoryMax=250M
+
+# It reads a socket and writes to a socket. It has no business writing anywhere but its own
+# heartbeat file, so the filesystem is read-only apart from /tmp.
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=false
+ReadWritePaths=/tmp
+NoNewPrivileges=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bmp-ws
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,38 @@
+[Unit]
+# Reads trades from Kafka, closes one-minute windows, writes them to object storage.
+Description=BMP trade aggregator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bmp
+WorkingDirectory=/home/bmp/binance-market-pipeline
+EnvironmentFile=/home/bmp/.bmp_env
+Environment=PYTHONPATH=/home/bmp/binance-market-pipeline/src
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/bmp/venv/bin/python -m bmp.aggregator
+
+Restart=always
+# Slower than the consumer's five seconds. A restart here rejoins a consumer group, and
+# rejoining every few seconds triggers a rebalance storm that stalls the group far longer than
+# the restart saves.
+RestartSec=20
+StartLimitIntervalSec=0
+
+# Holds at most a couple of minutes of open windows across twenty symbols, plus a Parquet buffer
+# per flush. 300 MB is roughly four times the measured need, which leaves room for a busy minute
+# without leaving room for a leak.
+MemoryMax=300M
+
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/tmp /home/bmp/binance-market-pipeline/data
+NoNewPrivileges=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bmp-agg
+
+[Install]
+WantedBy=multi-user.target
