@@ -81,3 +81,37 @@ models:
     tests:
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns: [symbol, date_key, minute_key]
+
+  - name: fct_layer_reconciliation
+    description: >
+      One row per minute the batch and speed layers both produced, with the differences and a
+      verdict. Agreement is evidence the stream is right; disagreement carries its own diagnosis.
+    columns:
+      - name: symbol
+        tests: [not_null]
+      - name: minute
+        tests: [not_null]
+      - name: verdict
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['exact', 'boundary_mismatch', 'stream_missed_trades',
+                       'stream_double_counted', 'volume_only']
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [symbol, minute]
+
+  - name: fct_stream_coverage
+    description: >
+      How much of each symbol-day the stream captured. Separate from the reconciliation so an
+      outage cannot be mistaken for an accuracy problem.
+    columns:
+      - name: coverage_pct
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              max_value: 100
+              config: {where: "coverage_pct is not null"}
+      - name: minutes_missing
+        tests:
+          - dbt_utils.expression_is_true: {expression: ">= 0"}

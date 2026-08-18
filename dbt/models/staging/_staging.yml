@@ -16,6 +16,18 @@ sources:
           - name: minute
             tests: [not_null]
 
+      - name: trades_1m
+        description: >
+          One-minute bars the speed layer built from the live trade feed. Same grain and almost
+          the same columns as klines_1m on purpose — the reconciliation compares them column by
+          column, and a difference in shape would hide a difference in content.
+        loaded_at_field: loaded_at
+        columns:
+          - name: symbol
+            tests: [not_null]
+          - name: minute
+            tests: [not_null]
+
       - name: exchange_info
         description: >
           Daily snapshot of symbol metadata. Binance serves only the current state, so a day

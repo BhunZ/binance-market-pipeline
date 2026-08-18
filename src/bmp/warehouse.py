@@ -238,3 +238,120 @@ def load_exchange_info(df, run_date: str) -> int:
             copy.write(buf.read())
         conn.commit()
     return len(df)
+
+
+# ----------------------------------------------------------------------------------
+# Speed layer — the same minutes, computed the other way
+# ----------------------------------------------------------------------------------
+
+STREAM_TABLE = "trades_1m"
+
+#: Deliberately the same grain and almost the same columns as `klines_1m`. Two tables that look
+#: alike are the point: the reconciliation compares them column by column, and a difference in
+#: shape would hide a difference in content.
+STREAM_DDL = f"""
+CREATE TABLE IF NOT EXISTS {RAW_SCHEMA}.{STREAM_TABLE} (
+    symbol         text        NOT NULL,
+    minute         timestamptz NOT NULL,
+    dt             date        NOT NULL,
+    open           numeric(38, 12) NOT NULL,
+    high           numeric(38, 12) NOT NULL,
+    low            numeric(38, 12) NOT NULL,
+    close          numeric(38, 12) NOT NULL,
+    volume         numeric(38, 12) NOT NULL,
+    quote_volume   numeric(38, 12) NOT NULL,
+    trades         integer     NOT NULL,
+    taker_base     numeric(38, 12) NOT NULL,
+    taker_quote    numeric(38, 12) NOT NULL,
+    first_trade_id bigint,
+    last_trade_id  bigint,
+    loaded_at      timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (symbol, minute)
+);
+
+CREATE INDEX IF NOT EXISTS idx_trades_1m_dt ON {RAW_SCHEMA}.{STREAM_TABLE} (dt);
+"""
+
+
+def ensure_stream_schema() -> None:
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(STREAM_DDL)
+        conn.commit()
+
+
+def stream_glob(run_date: str) -> str:
+    if objstore.is_configured():
+        return f"r2://{objstore.bucket()}/bronze/trades_1m/dt={run_date}/*/*.parquet"
+    return (DATA_DIR / "bronze" / "trades_1m" / f"dt={run_date}" / "*" / "*.parquet").as_posix()
+
+
+def read_stream_day(run_date: str) -> pd.DataFrame:
+    """One day of stream-derived bars.
+
+    Unlike the batch branch this can legitimately be partial: the aggregator writes a minute only
+    once it has seen it, so a restart leaves a gap. Loading what exists and letting the
+    reconciliation report the gap is right — filling it here would erase the evidence.
+    """
+    con = _duckdb_reader()
+    try:
+        df = con.execute(f"""
+            SELECT
+                symbol,
+                minute,
+                DATE '{run_date}'                    AS dt,
+                CAST(open         AS DECIMAL(38,12)) AS open,
+                CAST(high         AS DECIMAL(38,12)) AS high,
+                CAST(low          AS DECIMAL(38,12)) AS low,
+                CAST(close        AS DECIMAL(38,12)) AS close,
+                CAST(volume       AS DECIMAL(38,12)) AS volume,
+                CAST(quote_volume AS DECIMAL(38,12)) AS quote_volume,
+                CAST(trades       AS INTEGER)        AS trades,
+                CAST(taker_base   AS DECIMAL(38,12)) AS taker_base,
+                CAST(taker_quote  AS DECIMAL(38,12)) AS taker_quote,
+                CAST(first_trade_id AS BIGINT)       AS first_trade_id,
+                CAST(last_trade_id  AS BIGINT)       AS last_trade_id
+            FROM read_parquet('{stream_glob(run_date)}', hive_partitioning = true)
+            ORDER BY symbol, minute
+        """).df()
+    except Exception as exc:
+        # No partitions for that date is a normal state, not an error: the stream started later
+        # than the batch history goes back, and will always have days the batch layer has.
+        logger.info("no stream partitions for %s (%s)", run_date, type(exc).__name__)
+        return pd.DataFrame()
+    finally:
+        con.close()
+    return df
+
+
+def load_stream_day(run_date: str) -> int:
+    """Replace one date of stream bars. Same delete-then-insert as the batch branch."""
+    df = read_stream_day(run_date)
+    if df.empty:
+        return 0
+
+    buf = io.StringIO()
+    df.to_csv(buf, index=False, header=False)
+    buf.seek(0)
+
+    cols = ", ".join(df.columns)
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(f"DELETE FROM {RAW_SCHEMA}.{STREAM_TABLE} WHERE dt = %s", (run_date,))
+        with cur.copy(
+            f"COPY {RAW_SCHEMA}.{STREAM_TABLE} ({cols}) FROM STDIN WITH (FORMAT csv)"
+        ) as copy:
+            copy.write(buf.read())
+        conn.commit()
+
+    logger.info("loaded stream %s: %d rows", run_date, len(df))
+    return len(df)
+
+
+def stream_dates() -> list[str]:
+    """Dates that have stream bars in object storage."""
+    if not objstore.is_configured():
+        return []
+    dates = set()
+    for key in objstore.list_keys("bronze/trades_1m/"):
+        if "dt=" in key:
+            dates.add(key.split("dt=")[1].split("/")[0])
+    return sorted(dates)

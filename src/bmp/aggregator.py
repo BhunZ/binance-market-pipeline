@@ -14,9 +14,20 @@ written.
 layer, and the reconciliation would report a difference with no way to explain it. Counted, the
 same difference arrives with its own cause attached.
 
-**Offsets are committed after a write, not before.** A crash between reading and writing then
-replays those trades rather than losing them. The cost is that a window can be written twice —
-harmless, because writing a partition replaces it with identical content.
+**An offset is never committed past a window still open.** Committing the read position looks
+right and is not: Kafka keeps one offset per partition, so committing because the minute that
+just closed was written also commits past the trades sitting in the minute that has not. A
+restart then resumes *inside* a minute and rebuilds it from whatever was left — which is how a
+clean restart at 07:06:36 left all twenty symbols holding about a third of that minute, with no
+error anywhere and a bar that looked entirely plausible. The reconciliation against Binance's
+own candles is what found it. So the commit is held back to the oldest offset feeding an open
+window, and a restart replays that minute from its first trade.
+
+**Windows close on event time, not on the clock.** After an outage the backlog comes out of
+Kafka in seconds, and by the clock every minute in it is long overdue — so a flush landing
+mid-replay would write a half-built window and then reject the rest of its own trades as late.
+The trigger is the watermark: the newest exchange timestamp seen, which advances with the data
+instead of running ahead of it.
 """
 
 from __future__ import annotations
@@ -31,7 +42,7 @@ import time
 from dataclasses import dataclass, field
 
 import pandas as pd
-from confluent_kafka import Consumer, KafkaError
+from confluent_kafka import Consumer, KafkaError, TopicPartition
 
 from . import kafka_conf, objstore
 from .config import DATA_DIR
@@ -150,6 +161,11 @@ class Aggregator:
         # (symbol, minute) -> Bar. Bounded by the grace period: at most a couple of minutes of
         # windows for twenty symbols, so a few dozen objects rather than a growing buffer.
         self.windows: dict[tuple[str, dt.datetime], Bar] = {}
+        # Per open window, the lowest Kafka offset per partition that fed it. This is what the
+        # commit is clamped to, so no trade in an unwritten window is ever marked consumed.
+        self.offsets: dict[tuple[str, dt.datetime], dict[int, int]] = {}
+        #: Newest exchange timestamp seen. Everything closes against this rather than the clock.
+        self.watermark: dt.datetime | None = None
         self.late: list[dict] = []
         # Minutes already written. A trade is late because its window is **gone**, not because
         # the clock has moved on — the distinction matters after any outage, when the backlog
@@ -159,7 +175,8 @@ class Aggregator:
         self.written: set[tuple[str, dt.datetime]] = set()
         self.stats = Stats()
 
-    def ingest(self, payload: dict, now: float | None = None) -> None:
+    def ingest(self, payload: dict, now: float | None = None,
+               partition: int | None = None, offset: int | None = None) -> None:
         """One trade into its window, or into the late pile if that window has already gone."""
         now = now if now is not None else time.time()
         try:
@@ -177,7 +194,18 @@ class Aggregator:
         minute = minute_of(event_ms)
         key = (symbol, minute)
 
-        if key not in self.windows and key in self.written:
+        event_time = dt.datetime.fromtimestamp(event_ms / 1000, dt.UTC)
+        if self.watermark is None or event_time > self.watermark:
+            self.watermark = event_time
+
+        # Late means the window is gone, by either of the two ways it can go. `written` covers
+        # this process; the watermark covers the one before it, whose `written` set died with it
+        # and whose replayed trades would otherwise rebuild a finished minute from its tail
+        # alone and overwrite the complete bar with it.
+        gone = key in self.written or (self.horizon() is not None
+                                       and minute + dt.timedelta(minutes=1) <= self.horizon())
+
+        if key not in self.windows and gone:
             self.stats.late += 1
             self.late.append({
                 "symbol": symbol,
@@ -191,17 +219,47 @@ class Aggregator:
             return
 
         self.windows.setdefault(key, Bar()).add(price, qty, is_buyer_maker, trade_id)
+        if partition is not None and offset is not None:
+            seen = self.offsets.setdefault(key, {})
+            seen[partition] = min(seen.get(partition, offset), offset)
         self.stats.consumed += 1
 
-    def due(self, now: float | None = None) -> list[tuple[str, dt.datetime, Bar]]:
-        """Windows whose minute ended more than the grace period ago."""
-        cutoff = (now if now is not None else time.time()) - LATENESS_GRACE_S
-        return [(sym, minute, bar) for (sym, minute), bar in self.windows.items()
-                if (minute + dt.timedelta(minutes=1)).timestamp() <= cutoff]
+    def horizon(self) -> dt.datetime | None:
+        """The instant below which a minute is considered finished.
 
-    def flush(self, now: float | None = None) -> int:
+        Derived from the data, not the clock. `None` until the first trade, because nothing can
+        be known to be complete before anything has been seen.
+        """
+        if self.watermark is None:
+            return None
+        return self.watermark - dt.timedelta(seconds=LATENESS_GRACE_S)
+
+    def due(self) -> list[tuple[str, dt.datetime, Bar]]:
+        """Windows the data has moved past.
+
+        Event time, deliberately: while a backlog replays, the clock is minutes ahead of the
+        trades coming out of Kafka, and closing a window because the clock says so writes it
+        half-built and discards the rest.
+        """
+        horizon = self.horizon()
+        if horizon is None:
+            return []
+        return [(sym, minute, bar) for (sym, minute), bar in self.windows.items()
+                if minute + dt.timedelta(minutes=1) <= horizon]
+
+    def safe_offsets(self, position: dict[int, int]) -> dict[int, int]:
+        """Where each partition may be committed to: the read position, held back to the oldest
+        offset still feeding a window that has not been written."""
+        safe = dict(position)
+        for seen in self.offsets.values():
+            for part, off in seen.items():
+                if part in safe:
+                    safe[part] = min(safe[part], off)
+        return safe
+
+    def flush(self) -> int:
         """Write every due window, then forget it. Returns windows written."""
-        ready = self.due(now)
+        ready = self.due()
         written = 0
 
         for symbol, minute, bar in ready:
@@ -211,6 +269,7 @@ class Aggregator:
                 local_path=DATA_DIR / trades_key(minute, symbol),
             )
             del self.windows[(symbol, minute)]
+            self.offsets.pop((symbol, minute), None)
             self.written.add((symbol, minute))
             written += 1
 
@@ -237,6 +296,20 @@ class Aggregator:
         return written
 
 
+def commit_safely(consumer: Consumer, agg: "Aggregator", position: dict[int, int]) -> None:
+    """Commit each partition no further than the oldest trade still held in an open window.
+
+    `consumer.commit()` with no arguments commits the read position, which is past every trade
+    already handed to the aggregator — including the ones in windows that have not been written.
+    """
+    safe = agg.safe_offsets(position)
+    if not safe:
+        return
+    consumer.commit(offsets=[TopicPartition(kafka_conf.TOPIC_TRADES, part, off)
+                             for part, off in safe.items()],
+                    asynchronous=False)
+
+
 def run(group_id: str = "aggregator", duration_s: float | None = None) -> Stats:
     """Consume trades and write minute bars until stopped."""
     if not kafka_conf.is_configured():
@@ -258,6 +331,9 @@ def run(group_id: str = "aggregator", duration_s: float | None = None) -> Stats:
         signal.signal(sig, _stop)
 
     last_flush = time.monotonic()
+    # Next offset to read per partition. Kafka commits the position to resume *from*, so it is
+    # the offset just consumed plus one.
+    position: dict[int, int] = {}
 
     try:
         while not stopping and (deadline is None or time.monotonic() < deadline):
@@ -269,21 +345,27 @@ def run(group_id: str = "aggregator", duration_s: float | None = None) -> Stats:
                         logger.error("consume error: %s", msg.error())
                 else:
                     try:
-                        agg.ingest(json.loads(msg.value()))
+                        agg.ingest(json.loads(msg.value()),
+                                   partition=msg.partition(), offset=msg.offset())
                     except json.JSONDecodeError:
                         agg.stats.malformed += 1
+                    position[msg.partition()] = msg.offset() + 1
 
             if time.monotonic() - last_flush >= FLUSH_INTERVAL_S:
                 if agg.flush():
-                    # Commit only after the windows are on object storage. A crash before this
-                    # replays those trades; a crash after would have lost them.
-                    consumer.commit(asynchronous=False)
+                    # Only after the windows are on object storage, and only up to the oldest
+                    # trade still held open. A crash before this replays those trades; a crash
+                    # after would have lost them.
+                    commit_safely(consumer, agg, position)
                     logger.info(agg.stats.line())
                 last_flush = time.monotonic()
     finally:
+        # Whatever is still open stays unwritten on purpose. Its offsets were never committed,
+        # so the next process replays those minutes from their first trade and builds them whole
+        # — where writing them here would write a fraction of a minute and call it a candle.
         agg.flush()
         try:
-            consumer.commit(asynchronous=False)
+            commit_safely(consumer, agg, position)
         except Exception:
             logger.warning("final commit failed - those trades will be replayed", exc_info=True)
         consumer.close()
