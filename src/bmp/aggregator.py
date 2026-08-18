@@ -151,6 +151,12 @@ class Aggregator:
         # windows for twenty symbols, so a few dozen objects rather than a growing buffer.
         self.windows: dict[tuple[str, dt.datetime], Bar] = {}
         self.late: list[dict] = []
+        # Minutes already written. A trade is late because its window is **gone**, not because
+        # the clock has moved on — the distinction matters after any outage, when the backlog
+        # replayed out of Kafka is entirely older than the grace period and yet none of it has
+        # been written. Judging by the clock filed 120,919 trades as late and built no bars at
+        # all for the twenty minutes the aggregator had been crash-looping.
+        self.written: set[tuple[str, dt.datetime]] = set()
         self.stats = Stats()
 
     def ingest(self, payload: dict, now: float | None = None) -> None:
@@ -171,7 +177,7 @@ class Aggregator:
         minute = minute_of(event_ms)
         key = (symbol, minute)
 
-        if key not in self.windows and self._already_closed(minute, now):
+        if key not in self.windows and key in self.written:
             self.stats.late += 1
             self.late.append({
                 "symbol": symbol,
@@ -186,9 +192,6 @@ class Aggregator:
 
         self.windows.setdefault(key, Bar()).add(price, qty, is_buyer_maker, trade_id)
         self.stats.consumed += 1
-
-    def _already_closed(self, minute: dt.datetime, now: float) -> bool:
-        return now > (minute + dt.timedelta(minutes=1)).timestamp() + LATENESS_GRACE_S
 
     def due(self, now: float | None = None) -> list[tuple[str, dt.datetime, Bar]]:
         """Windows whose minute ended more than the grace period ago."""
@@ -208,7 +211,15 @@ class Aggregator:
                 local_path=DATA_DIR / trades_key(minute, symbol),
             )
             del self.windows[(symbol, minute)]
+            self.written.add((symbol, minute))
             written += 1
+
+        # The written set is only needed for as long as a trade could still arrive for a minute.
+        # Two hours is far beyond any plausible delay and keeps the set to a few thousand entries
+        # instead of growing for the life of the process.
+        if len(self.written) > 20_000:
+            cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(hours=2)
+            self.written = {(s, m) for s, m in self.written if m >= cutoff}
 
         if self.late:
             grouped: dict[tuple[str, dt.datetime], list[dict]] = collections.defaultdict(list)
