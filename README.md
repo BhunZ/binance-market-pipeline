@@ -19,9 +19,10 @@ Twenty USDT pairs, one-minute resolution, 90 days of history — about 2.6 milli
 | Milestone | What it adds | State |
 |---|---|---|
 | **M1** | Airflow DAG, backfill, Bronze on object storage | **done** |
-| M2 | Postgres warehouse, dbt star schema, tests | next |
-| M3 | Kafka, WebSocket consumer, one-minute windows | |
-| M4 | Cross-layer reconciliation, health checks | |
+| **M2** | Postgres warehouse, dbt star schema, tests | **done** |
+| **M3** | Kafka, WebSocket consumer, one-minute windows | **done** |
+| **M4** | Cross-layer reconciliation | **done** |
+| M5 | Health checks and alerting | next |
 
 ---
 
