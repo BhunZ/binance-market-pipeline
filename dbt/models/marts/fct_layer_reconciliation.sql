@@ -34,8 +34,13 @@ with batch as (
 
 stream as (
 
+    -- The newest minute is excluded because a live stream is always part way through writing
+    -- it: some symbols are on object storage, the rest are still open in memory. Comparing it
+    -- reports the reader's timing as a pipeline fault, which is how a healthy run came back
+    -- showing eight of twenty symbols short by 150%.
     select symbol, minute, open, high, low, close, volume, quote_volume, trades, taker_base
     from {{ source('raw', 'trades_1m') }}
+    where minute < (select max(minute) from {{ source('raw', 'trades_1m') }})
 
 ),
 
