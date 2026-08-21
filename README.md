@@ -1,5 +1,16 @@
 # Binance market data pipeline
 
+<p>
+  <img src="https://img.shields.io/badge/Airflow-3.0-017CEE?logo=apacheairflow&logoColor=white" alt="Apache Airflow" />
+  <img src="https://img.shields.io/badge/dbt-1.8-FF694B?logo=dbt&logoColor=white" alt="dbt" />
+  <img src="https://img.shields.io/badge/Kafka-confluent-231F20?logo=apachekafka&logoColor=white" alt="Apache Kafka" />
+  <img src="https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white" alt="PostgreSQL" />
+  <img src="https://img.shields.io/badge/python-3.12-3776AB?logo=python&logoColor=white" alt="Python 3.12" />
+  <img src="https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white" alt="Docker" />
+  <img src="https://img.shields.io/badge/storage-S3%20compatible-F38020?logo=cloudflare&logoColor=white" alt="S3-compatible object storage" />
+  <img src="https://img.shields.io/badge/deploy-Linux%20%2F%20systemd-FCC624?logo=linux&logoColor=black" alt="Linux and systemd" />
+</p>
+
 A batch and streaming pipeline over Binance public market data, built to answer one question
 honestly: **is the stream right?**
 
@@ -230,7 +241,47 @@ code is non-zero either way so the timer records the failure regardless.
 
 ---
 
-## What the tests hold
+## Challenges — and what holds them down
+
+Every problem worth recording here produces **no error message**. That is the shape of failure this
+pipeline is built against, and it is why each one below is now an invariant something enforces
+rather than something to remember.
+
+### A restart lost part of a minute, silently
+
+Kafka keeps one offset per partition. Committing the read position because the minute that closed
+was written also commits past the trades held in the minute that has **not** — so a restart resumes
+*inside* a minute and rebuilds it from whatever was left. Clean logs, correct row counts, entirely
+plausible candles.
+
+Two changes hold it down, and one alone is not enough. The commit is clamped to the oldest offset
+still feeding an open window, so a restart replays that minute from its first trade. And windows
+close on the watermark rather than the clock, because during a replay the clock runs minutes ahead
+of the data and a flush landing mid-replay would write a half-built window.
+
+Only the cross-layer reconciliation could have found this: the same minute computed twice, by
+different code, over different transport.
+
+### A green run that did nothing
+
+`load_pending` skips when the warehouse already holds every complete Bronze day. Under Airflow's
+default trigger rule that skip **propagates**, so the whole chain skipped and the run still reported
+`success` — indistinguishable from a run that worked.
+
+It took the dimension snapshot with it, which cannot be recovered later because the exchange serves
+only its current state. The snapshot is now a root task rather than a consequence of loading klines,
+and the dbt steps run under `none_failed`: a skip upstream means there was no work, not that the
+work failed.
+
+### An empty fact table passing every test
+
+dbt stamps a snapshot's validity start with the moment it first ran, which postdated ninety days of
+existing history — so no fact matched any dimension row and the join produced nothing. Sixty tests
+passed, because every one of them describes rows that arrived and none describes rows that should
+have. The fix backdates the first version; the guard is a coverage test comparing fact and source
+row counts, verified by removing the backdating and watching exactly one test fail.
+
+### The invariants that now hold
 
 dbt tests run inside `dbt build` rather than after it, so a model whose test fails blocks
 everything downstream instead of letting the failure propagate into tables that then look fine.
